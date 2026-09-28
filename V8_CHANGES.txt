@@ -1,0 +1,7 @@
+NMRfilter Streamlit v8
+- Stage 4 output is streamed live to Streamlit.
+- nmrfilter2.py reports timings for clustering, community detection, background preparation and similarity/ranking.
+- similarity.py reports candidate-by-candidate matching progress.
+- Candidate plot rendering is optional and OFF by default.
+- Simulated text labels are OFF by default because textalloc can be slow for dense spectra.
+- Stage 4 timeout increased to 30 minutes, with the last active operation visible before timeout.

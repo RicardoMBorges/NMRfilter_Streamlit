@@ -1,0 +1,7 @@
+NMRfilter Streamlit v11
+- Restored legacy two-stage clustering semantics.
+- Removed v9/v10 raw-peak transitive union-find behavior.
+- Retained deterministic union-find only for merging legacy carbon bins bridged by legacy proton bins.
+- Added known-positive regression tests.
+- Added RUN_CLUSTER_VALIDATION.bat.
+- Preserved v10 ranking/configuration fix and v8 instrumentation.

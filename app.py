@@ -1,0 +1,231 @@
+from __future__ import annotations
+import configparser, io, os, re, shutil, subprocess, sys, tempfile, time, uuid, zipfile
+from pathlib import Path
+import streamlit as st
+import pandas as pd
+from spectrum_io import parse_measured_spectrum_text, to_legacy_tsv
+
+ROOT = Path(__file__).resolve().parent
+PROJECTS = ROOT / 'streamlit_projects'
+
+def java_property_path(path: Path) -> str:
+    """Return an absolute path safe for java.util.Properties on Windows/Linux.
+
+    Backslashes in .properties are escape characters; Path.as_posix() avoids
+    Java turning C:\\Users\\... into C:Users....
+    """
+    return path.resolve().as_posix()
+PROJECTS.mkdir(exist_ok=True)
+
+st.set_page_config(page_title='NMRfilter', page_icon='🧪', layout='wide')
+
+SOLVENTS=['Methanol-D4 (CD3OD)','Chloroform-D1 (CDCl3)','Dimethylsulphoxide-D6 (DMSO-D6, C2D6SO)','Unreported']
+
+def safe_name(s):
+    s=re.sub(r'[^A-Za-z0-9_.-]+','_',s.strip())
+    return s.strip('._') or 'project'
+
+def write_props(project_dir, opts):
+    cp=configparser.ConfigParser()
+    cp['onesectiononly']={
+      'datadir': java_property_path(PROJECTS), 'msmsinput':'testall.smi','predictionoutput':'resultprediction.csv',
+      'result':'result.txt','solvent':opts['solvent'],'tolerancec':str(opts['tolerancec']),
+      'toleranceh':str(opts['toleranceh']),'spectruminput':'realspectrum.csv','clusteringoutput':'cluster.txt',
+      'rberresolution':str(opts['rberresolution']),'louvainoutput':'clusterslouvain.txt',
+      'usehsqctocsy':str(opts['usehsqctocsy']).lower(),'usehmbc':str(opts['usehmbc']).lower(),
+      'dotwobonds':str(opts['dotwobonds']).lower(),'usedeeplearning':'false','debug':str(opts['debug']).lower(),
+      'labelsimulated':str(opts['labelsimulated']).lower(),'generateplots':str(opts['generateplots']).lower(),'generatehtmlplots':str(opts.get('generatehtmlplots',True)).lower(),'htmlplotstopn':str(opts.get('htmlplotstopn',10)),'plotopacitymatched':str(opts.get('plotopacitymatched',0.95)),'plotopacitysimulated':str(opts.get('plotopacitysimulated',0.45)),'plotopacityunmatched':str(opts.get('plotopacityunmatched',0.28)),'plotopacitymisc':str(opts.get('plotopacitymisc',0.12)),'hmbcbruker':'NaN','hsqcbruker':'NaN','hsqctocsybruker':'NaN'}
+    with open(project_dir/'nmrproc.properties','w',encoding='utf-8') as f: cp.write(f)
+
+def global_props():
+    # Java reads the root properties file before project overrides. Point it at Streamlit's project store.
+    cp=configparser.ConfigParser(); cp.read(ROOT/'nmrproc.properties')
+    cp['onesectiononly']['datadir']=java_property_path(PROJECTS)
+    for k in ('hmbcbruker','hsqcbruker','hsqctocsybruker'): cp['onesectiononly'][k]='NaN'
+    with open(ROOT/'nmrproc.properties','w',encoding='utf-8') as f: cp.write(f)
+
+def run(cmd, log, timeout=900):
+    p=subprocess.run(cmd,cwd=ROOT,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=timeout)
+    log.append('$ '+' '.join(map(str,cmd))+'\n'+p.stdout)
+    if p.returncode: raise RuntimeError(f"Command failed ({p.returncode}): {' '.join(map(str,cmd))}\n{p.stdout[-4000:]}")
+    return p.stdout
+
+def run_live(cmd, log, status, timeout=1800):
+    """Run a command while streaming its output into the Streamlit status panel."""
+    started=time.monotonic()
+    p=subprocess.Popen(cmd,cwd=ROOT,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,bufsize=1)
+    lines=[]
+    try:
+        for line in iter(p.stdout.readline, ''):
+            if line:
+                line=line.rstrip()
+                lines.append(line)
+                status.write(line)
+            if time.monotonic()-started > timeout:
+                p.kill()
+                raise TimeoutError(f"Stage 4 exceeded {timeout//60} minutes. Last output: " + (lines[-1] if lines else 'none'))
+        rc=p.wait()
+    finally:
+        if p.stdout: p.stdout.close()
+    output='\n'.join(lines)
+    log.append('$ '+' '.join(map(str,cmd))+'\n'+output)
+    if rc:
+        raise RuntimeError(f"Command failed ({rc}): {' '.join(map(str,cmd))}\n{output[-6000:]}")
+    return output
+
+def java_cp():
+    sep=';' if os.name=='nt' else ':'
+    return str(ROOT/'lib'/'simulate.jar')+sep+str(ROOT/'lib'/'*')
+
+def validate(candidate, spectrum, names, unlabeled_type=''):
+    errs=[]
+    if not candidate: errs.append('Candidate structure file is required.')
+    if not spectrum: errs.append('Measured spectrum file is required.')
+    if candidate:
+        txt=candidate.getvalue().decode('utf-8-sig',errors='replace')
+        lines=[x.strip() for x in txt.splitlines() if x.strip()]
+        if not lines: errs.append('Candidate file is empty.')
+    if spectrum:
+        txt=spectrum.getvalue().decode('utf-8-sig',errors='replace')
+        records, skipped = parse_measured_spectrum_text(txt, default_type=unlabeled_type)
+        if not records:
+            errs.append('Measured spectrum contains no readable 13C/1H peak pairs. TAB, comma and semicolon delimiters are accepted.')
+        else:
+            untyped=sum(1 for _c,_h,t in records if not t)
+            if untyped:
+                errs.append(f'{untyped}/{len(records)} measured peaks have no experiment type. For a two-column peak list, select its experiment type in the input options; mixed experiments require section labels or a third type column.')
+    return errs
+
+def zip_project(pdir):
+    bio=io.BytesIO()
+    with zipfile.ZipFile(bio,'w',zipfile.ZIP_DEFLATED) as z:
+        for p in pdir.rglob('*'):
+            if p.is_file(): z.write(p,p.relative_to(pdir))
+    return bio.getvalue()
+
+st.title('NMRfilter')
+st.caption('Streamlit interface for the original NMRfilter v1.5 pipeline')
+with st.expander('Input format and workflow', expanded=False):
+    st.markdown('**Candidates:** one SMILES per line (`.smi` or text). **Measured spectrum:** 13C and 1H shifts with experiment identity (HMBC/HSQC/HSQCTOCSY). TAB, comma and semicolon files are accepted; use legacy section labels or a third `type` column. Candidate names are optional but recommended for plots. The app runs the original conversion, simulation, clustering/community detection and similarity ranking pipeline.')
+
+left,right=st.columns([1.15,.85])
+with left:
+    project_name=st.text_input('Project name','nmrfilter_run')
+    candidate=st.file_uploader('Candidate structures — SMILES, one per line',type=['smi','txt','csv'])
+    spectrum=st.file_uploader('Measured 2D NMR spectrum — 13C and 1H shifts',type=['csv','txt','tsv'])
+    names=st.file_uploader('Candidate names (optional, one per candidate)',type=['txt','csv'])
+with right:
+    solvent=st.selectbox('Solvent',SOLVENTS)
+    c1,c2=st.columns(2)
+    tolerancec=c1.number_input('13C tolerance (ppm)',0.001,10.0,0.2,0.01)
+    toleranceh=c2.number_input('1H tolerance (ppm)',0.001,2.0,0.02,0.01,format='%.3f')
+    rber=st.number_input('Louvain/RBER resolution',0.01,10.0,0.2,0.05)
+    usehmbc=st.checkbox('Use HMBC',True)
+    usehsqctocsy=st.checkbox('Use HSQC-TOCSY',False)
+    dotwobonds=st.checkbox('Use 2 HOSE spheres',False)
+    labels=st.checkbox('Label simulated spectra',False, help='Text label allocation can be slow for dense spectra.')
+    generateplots=st.checkbox('Generate legacy PNG candidate plots',False, help='Optional legacy Matplotlib output. This is independent of the interactive HTML plots below.')
+    generatehtmlplots=st.checkbox('Generate interactive HTML plots',True, help='Creates standalone Plotly HTML files after numerical ranking, without changing the matching calculation.')
+    htmlplotstopn=st.number_input('Interactive plots — Top N candidates',1,30,10,1, help='HTML plots are generated only for the best-ranked N candidates to avoid unnecessary rendering.')
+    with st.expander('Plot appearance', expanded=False):
+        st.caption('Opacity of markers in the interactive HMBC/HSQC HTML plots.')
+        plotopacitymatched=st.slider('Matched — solid green circles',0.0,1.0,0.95,0.05)
+        plotopacitysimulated=st.slider('Simulated — gray open circles',0.0,1.0,0.45,0.05)
+        plotopacityunmatched=st.slider('Unmatched — red open squares',0.0,1.0,0.28,0.05)
+        plotopacitymisc=st.slider('Miscellaneous / unused — gray open squares',0.0,1.0,0.12,0.05)
+        st.caption(f'Values used on next run: matched={plotopacitymatched:.2f} · simulated={plotopacitysimulated:.2f} · unmatched={plotopacityunmatched:.2f} · miscellaneous={plotopacitymisc:.2f}')
+    debug=st.checkbox('Debug output',False)
+    unlabeled_mode=st.selectbox(
+        'Two-column spectrum interpretation',
+        ['Reject as ambiguous','HMBC','HSQC','HSQC-TOCSY'],
+        index=0,
+        help='Used only for numeric rows that do not already carry an experiment label. For mixed HMBC/HSQC data, keep Reject and label sections/rows explicitly.'
+    )
+    unlabeled_type={'Reject as ambiguous':'','HMBC':'HMBC','HSQC':'HSQC','HSQC-TOCSY':'HSQCTOCSY'}[unlabeled_mode]
+
+if st.button('Run NMRfilter',type='primary',use_container_width=True):
+    errs=validate(candidate,spectrum,names,unlabeled_type)
+    if errs:
+        for e in errs: st.error(e)
+    else:
+        pname=safe_name(project_name)+'_'+uuid.uuid4().hex[:8]
+        pdir=PROJECTS/pname; pdir.mkdir(parents=True)
+        (pdir/'testall.smi').write_bytes(candidate.getvalue())
+        spectrum_text=spectrum.getvalue().decode('utf-8-sig',errors='replace')
+        spectrum_records,_=parse_measured_spectrum_text(spectrum_text, default_type=unlabeled_type)
+        if unlabeled_type:
+            st.info(f'Unlabeled two-column peaks are being interpreted as {unlabeled_type}. Explicit labels in the file take precedence.')
+        (pdir/'realspectrum.csv').write_text(to_legacy_tsv(spectrum_records),encoding='utf-8')
+        if names: (pdir/'testallnames.txt').write_bytes(names.getvalue())
+        opts=dict(solvent=solvent,tolerancec=tolerancec,toleranceh=toleranceh,rberresolution=rber,usehmbc=usehmbc,usehsqctocsy=usehsqctocsy,dotwobonds=dotwobonds,labelsimulated=labels,generateplots=generateplots,generatehtmlplots=generatehtmlplots,htmlplotstopn=int(htmlplotstopn),plotopacitymatched=plotopacitymatched,plotopacitysimulated=plotopacitysimulated,plotopacityunmatched=plotopacityunmatched,plotopacitymisc=plotopacitymisc,debug=debug)
+        write_props(pdir,opts); global_props(); logs=[]
+        status=st.status('Running NMRfilter…',expanded=True)
+        try:
+            status.write('1/4 Preparing project')
+            run([sys.executable,'nmrfilter.py',pname],logs)
+            status.write('2/4 Converting candidate structures')
+            out=run(['java','-cp',java_cp(),'uk.ac.dmu.simulate.Convert',pname],logs)
+            # Respredict is deliberately unsupported in this wrapper; default engine uses HOSE prediction.
+            status.write('3/4 Simulating candidate spectra')
+            run(['java','-cp',java_cp(),'uk.ac.dmu.simulate.Simulate',pname],logs)
+            status.write('4/4 Clustering measured peaks and ranking candidates')
+            run_live([sys.executable,'-u','nmrfilter2.py',pname],logs,status,timeout=1800)
+            status.update(label='NMRfilter completed',state='complete',expanded=False)
+            result=pdir/'result'/'result.txt'
+            if not result.exists(): result=pdir/'result.txt'
+            st.success('Pipeline completed successfully.')
+            ranking_tsv=pdir/'result'/'ranking_table.tsv'
+            if ranking_tsv.exists():
+                st.subheader('Ranking')
+                rdf=pd.read_csv(ranking_tsv,sep='\t')
+                # Preserve matched/total text while exposing numeric percentages as progress bars.
+                rename={c:c.replace('Mathcing rate','Matching rate') for c in rdf.columns}
+                rdf=rdf.rename(columns=rename)
+                progress_cols=[]
+                for c in list(rdf.columns):
+                    if c.startswith('Matching rate '):
+                        vals=pd.to_numeric(rdf[c].astype(str).str.replace('%','',regex=False),errors='coerce')
+                        rdf[c]=vals
+                        progress_cols.append(c)
+                cfg={
+                    'Rank': st.column_config.NumberColumn('Rank',format='%d'),
+                    'Distance': st.column_config.NumberColumn('Distance',format='%.2f'),
+                    'Standard deviation': st.column_config.NumberColumn('Standard deviation',format='%.2f'),
+                }
+                for c in progress_cols:
+                    cfg[c]=st.column_config.ProgressColumn(c,help='Fraction of simulated correlations matched by the measured spectrum.',format='%.1f%%',min_value=0,max_value=100)
+                st.dataframe(rdf,use_container_width=True,hide_index=True,column_config=cfg)
+                st.download_button('Download ranking table (.tsv)',ranking_tsv.read_bytes(),file_name=f'{safe_name(project_name)}_ranking.tsv',mime='text/tab-separated-values')
+                with st.expander('Legacy text ranking',expanded=False):
+                    if result.exists(): st.code(result.read_text(encoding='utf-8',errors='replace'))
+            elif result.exists():
+                st.subheader('Ranking')
+                st.code(result.read_text(encoding='utf-8',errors='replace'))
+            else: st.warning('Pipeline exited successfully, but ranking output was not found. Inspect the run log below.')
+            html_dir=pdir/'plots_html'
+            html_plots=sorted(html_dir.glob('*.html')) if html_dir.exists() else []
+            if html_plots:
+                st.subheader('Interactive candidate plots')
+                st.caption('These HTML plots are generated from the same matched/unmatched arrays used by the numerical ranking.')
+                try:
+                    import streamlit.components.v1 as components
+                    for hp in html_plots:
+                        with st.expander(hp.stem.replace('_',' '), expanded=False):
+                            html_text=hp.read_text(encoding='utf-8',errors='replace')
+                            components.html(html_text,height=650,scrolling=True)
+                            st.download_button('Download HTML',html_text,file_name=hp.name,mime='text/html',key='html_'+hp.name)
+                    html_zip=io.BytesIO()
+                    with zipfile.ZipFile(html_zip,'w',zipfile.ZIP_DEFLATED) as z:
+                        for hp in html_plots: z.write(hp,hp.name)
+                    st.download_button('Download all interactive plots (.zip)',html_zip.getvalue(),file_name=f'{safe_name(project_name)}_interactive_plots.zip',mime='application/zip')
+                except Exception as plot_error:
+                    st.warning(f'HTML plots were generated but could not be embedded: {plot_error}')
+            plots=list((pdir/'plots').glob('*.png')) if (pdir/'plots').exists() else []
+            if plots:
+                st.subheader('Legacy PNG plots')
+                for p in plots[:30]: st.image(str(p),caption=p.name)
+            st.download_button('Download complete project/results ZIP',zip_project(pdir),file_name=f'{safe_name(project_name)}_nmrfilter_results.zip',mime='application/zip')
+        except Exception as e:
+            status.update(label='NMRfilter stopped',state='error',expanded=True)
+            st.error(str(e))
+        with st.expander('Run log',expanded=False): st.code('\n\n'.join(logs) if logs else 'No commands executed.')
