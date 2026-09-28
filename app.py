@@ -103,18 +103,34 @@ def zip_project(pdir):
             if p.is_file(): z.write(p,p.relative_to(pdir))
     return bio.getvalue()
 
-st.title('NMRfilter')
-st.caption('Streamlit interface for the original NMRfilter v1.5 pipeline')
-with st.expander('Input format and workflow', expanded=False):
-    st.markdown('**Candidates:** one SMILES per line (`.smi` or text). **Measured spectrum:** 13C and 1H shifts with experiment identity (HMBC/HSQC/HSQCTOCSY). TAB, comma and semicolon files are accepted; use legacy section labels or a third `type` column. Candidate names are optional but recommended for plots. The app runs the original conversion, simulation, clustering/community detection and similarity ranking pipeline.')
+# Sidebar — branding, inputs and configuration
+with st.sidebar:
+    logo1 = ROOT / 'static' / 'NMRfilter_icon.png'
+    logo2 = ROOT / 'static' / 'LAABio.png'
+    if logo1.exists(): st.image(str(logo1), use_container_width=True)
+    if logo2.exists(): st.image(str(logo2), use_container_width=True)
 
-left,right=st.columns([1.15,.85])
-with left:
+    st.header('NMRfilter')
+
+    tutorial_url = 'https://github.com/RicardoMBorges/NMRfilter_Streamlit/blob/main/Tutorial'
+    video_url = 'https://www.youtube.com/watch?v=pkY-rmvfDdU'
+    mock_data_url = 'https://github.com/RicardoMBorges/NMRfilter_Streamlit/tree/main/mock_data'
+    st.link_button('Tutorial', tutorial_url, use_container_width=True)
+    st.link_button('Video', video_url, use_container_width=True)
+    st.link_button('Mock data', mock_data_url, use_container_width=True)
+
+    st.caption('Streamlit interface for the original NMRfilter v1.5 pipeline')
+
+    with st.expander('Input format and workflow', expanded=False):
+        st.markdown('**Candidates:** one SMILES per line (`.smi` or text). **Measured spectrum:** 13C and 1H shifts with experiment identity (HMBC/HSQC/HSQCTOCSY). TAB, comma and semicolon files are accepted; use legacy section labels or a third `type` column. Candidate names are optional but recommended for plots. The app runs the original conversion, simulation, clustering/community detection and similarity ranking pipeline.')
+
+    st.subheader('Inputs')
     project_name=st.text_input('Project name','nmrfilter_run')
     candidate=st.file_uploader('Candidate structures — SMILES, one per line',type=['smi','txt','csv'])
     spectrum=st.file_uploader('Measured 2D NMR spectrum — 13C and 1H shifts',type=['csv','txt','tsv'])
     names=st.file_uploader('Candidate names (optional, one per candidate)',type=['txt','csv'])
-with right:
+
+    st.subheader('Parameters')
     solvent=st.selectbox('Solvent',SOLVENTS)
     c1,c2=st.columns(2)
     tolerancec=c1.number_input('13C tolerance (ppm)',0.001,10.0,0.2,0.01)
@@ -142,6 +158,25 @@ with right:
         help='Used only for numeric rows that do not already carry an experiment label. For mixed HMBC/HSQC data, keep Reject and label sections/rows explicitly.'
     )
     unlabeled_type={'Reject as ambiguous':'','HMBC':'HMBC','HSQC':'HSQC','HSQC-TOCSY':'HSQCTOCSY'}[unlabeled_mode]
+
+    st.divider()
+    st.subheader('Contact')
+    st.markdown('**Ricardo M Borges:** [ricardo_mborges@ufrj.br](mailto:ricardo_mborges@ufrj.br)  \n**Stefan Kuhn:** [stefan.kuhn@ut.ee](mailto:stefan.kuhn@ut.ee)')
+
+    with st.expander('Cite', expanded=False):
+        st.markdown("""
+**NMRfilter**  
+Kuhn, S., Colreavy-Donnelly, S., de Andrade Silva Quaresma, L. E. *et al.* (2020). Applying NMR compound identification using NMRfilter to match predicted to experimental data. *Metabolomics*, **16**, 123.  
+[https://doi.org/10.1007/s11306-020-01748-1](https://doi.org/10.1007/s11306-020-01748-1)
+
+**Integrated MS/NMR mixture analysis**  
+Kuhn, S., Colreavy-Donnelly, S., de Souza, J. S., & Borges, R. M. (2019). An integrated approach for mixture analysis using MS and NMR techniques. *Faraday Discussions*, **218**, 339–353.
+
+[PubMed record](https://pubmed.ncbi.nlm.nih.gov/33222074/)
+        """)
+
+st.title('NMRfilter')
+st.caption('Run the NMRfilter workflow using the inputs and parameters in the sidebar.')
 
 if st.button('Run NMRfilter',type='primary',use_container_width=True):
     errs=validate(candidate,spectrum,names,unlabeled_type)
