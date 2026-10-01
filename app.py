@@ -129,7 +129,7 @@ with st.sidebar:
 
     st.header('NMRfilter')
 
-    tutorial_url = 'https://github.com/RicardoMBorges/NMRfilter_Streamlit/blob/main/Tutorial'
+    tutorial_url = 'https://github.com/RicardoMBorges/NMRfilter_Streamlit/blob/main/NMRfilter_Complete_Tutorial.md'
     video_url = 'https://www.youtube.com/watch?v=pkY-rmvfDdU'
     mock_data_url = 'https://github.com/RicardoMBorges/NMRfilter_Streamlit/tree/main/mock_data'
     st.link_button('Tutorial', tutorial_url, use_container_width=True)
