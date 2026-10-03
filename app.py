@@ -46,7 +46,18 @@ def global_props():
     with open(ROOT/'nmrproc.properties','w',encoding='utf-8') as f: cp.write(f)
 
 def run(cmd, log, timeout=900):
-    p=subprocess.run(cmd,cwd=ROOT,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=timeout)
+    try:
+        p=subprocess.run(cmd,cwd=ROOT,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout or ''
+        if isinstance(output, bytes):
+            output = output.decode('utf-8', errors='replace')
+        log.append('$ '+' '.join(map(str,cmd))+'\n'+output)
+        raise TimeoutError(
+            f'{cmd[-2] if len(cmd) > 2 else cmd[0]} exceeded the time limit of {timeout//60} minutes. '
+            'Increase Simulation time limit or try a smaller candidate list. '
+            'Partial output is available in the run log.'
+        ) from exc
     log.append('$ '+' '.join(map(str,cmd))+'\n'+p.stdout)
     if p.returncode: raise RuntimeError(f"Command failed ({p.returncode}): {' '.join(map(str,cmd))}\n{p.stdout[-4000:]}")
     return p.stdout
@@ -225,6 +236,9 @@ with st.sidebar:
     spectrum=st.file_uploader('Measured 2D NMR spectrum — 13C and 1H shifts',type=['csv','txt','tsv'])
 
     st.subheader('Parameters')
+    simulation_timeout_minutes = st.number_input(
+        'Simulation time limit (minutes)', min_value=15, max_value=240, value=60, step=15,
+        help='Maximum time for each Java prediction stage. Increase this for large candidate lists; it does not make simulation faster.')
     solvent=st.selectbox('Solvent',SOLVENTS)
     c1,c2=st.columns(2)
     tolerancec=c1.number_input('13C tolerance (ppm)',0.001,10.0,0.2,0.01)
@@ -296,12 +310,12 @@ with workflow_tab:
                 status.write('1/4 Preparing project')
                 run([sys.executable,'nmrfilter.py',pname],logs)
                 status.write('Exporting complete atomic 13C/1H predictions from the HOSE simulator')
-                run(['java','-cp',java_cp(),'uk.ac.dmu.simulate.AtomicPredictions',str(pdir.resolve())],logs)
+                run(['java','-cp',java_cp(),'uk.ac.dmu.simulate.AtomicPredictions',str(pdir.resolve())],logs,timeout=int(simulation_timeout_minutes)*60)
                 status.write('2/4 Converting candidate structures')
                 out=run(['java','-cp',java_cp(),'uk.ac.dmu.simulate.Convert',pname],logs)
                 # Respredict is deliberately unsupported in this wrapper; default engine uses HOSE prediction.
                 status.write('3/4 Simulating candidate spectra')
-                run(['java','-cp',java_cp(),'uk.ac.dmu.simulate.Simulate',pname],logs)
+                run(['java','-cp',java_cp(),'uk.ac.dmu.simulate.Simulate',pname],logs,timeout=int(simulation_timeout_minutes)*60)
                 status.write('4/4 Clustering measured peaks and ranking candidates')
                 run_live([sys.executable,'-u','nmrfilter2.py',pname],logs,status,timeout=1800)
                 status.update(label='NMRfilter completed',state='complete',expanded=False)
